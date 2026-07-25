@@ -33,6 +33,7 @@ type LogPushEntry struct {
 
 var isTerm bool
 
+//nolint:gochecknoinits // init is used to detect terminal for log formatting
 func init() {
 	isTerm = isatty.IsTerminal(os.Stdout.Fd())
 }
@@ -153,8 +154,8 @@ func hideToken(token string, markLen int) string {
 	start := token[len(token)-markLen:]
 	end := token[0:markLen]
 
-	result := strings.Replace(token, start, strings.Repeat("*", markLen), -1)
-	result = strings.Replace(result, end, strings.Repeat("*", markLen), -1)
+	result := strings.ReplaceAll(token, start, strings.Repeat("*", markLen))
+	result = strings.ReplaceAll(result, end, strings.Repeat("*", markLen))
 
 	return result
 }
@@ -174,26 +175,32 @@ func GetLogPushEntry(input *InputLog) LogPushEntry {
 		token = hideToken(input.Token, 10)
 	}
 
+	message := input.Message
+	if input.HideMessage {
+		message = "(message redacted)"
+	}
+
 	return LogPushEntry{
 		ID:       input.ID,
 		Type:     input.Status,
 		Platform: plat,
 		Token:    token,
-		Message:  input.Message,
+		Message:  message,
 		Error:    errMsg,
 	}
 }
 
 // InputLog log request
 type InputLog struct {
-	ID        string
-	Status    string
-	Token     string
-	Message   string
-	Platform  int
-	Error     error
-	HideToken bool
-	Format    string
+	ID          string
+	Status      string
+	Token       string
+	Message     string
+	Platform    int
+	Error       error
+	HideToken   bool
+	HideMessage bool
+	Format      string
 }
 
 // LogPush record user push request and server response.

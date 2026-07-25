@@ -9,15 +9,18 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+var invalidLevel = "invalid"
 
 func TestSetLogLevel(t *testing.T) {
 	log := logrus.New()
 
 	err := SetLogLevel(log, "debug")
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
-	err = SetLogLevel(log, "invalid")
+	err = SetLogLevel(log, invalidLevel)
 	assert.Equal(t, "not a valid logrus Level: \"invalid\"", err.Error())
 }
 
@@ -25,33 +28,33 @@ func TestSetLogOut(t *testing.T) {
 	log := logrus.New()
 
 	err := SetLogOut(log, "stdout")
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	err = SetLogOut(log, "stderr")
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	err = SetLogOut(log, "log/access.log")
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	// missing create logs folder.
 	err = SetLogOut(log, "logs/access.log")
-	assert.NotNil(t, err)
+	require.Error(t, err)
 }
 
 func TestInitDefaultLog(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
 	// no errors on default config
-	assert.Nil(t, InitLog(
+	require.NoError(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
 		cfg.Log.ErrorLog,
 	))
 
-	cfg.Log.AccessLevel = "invalid"
+	cfg.Log.AccessLevel = invalidLevel
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -60,7 +63,7 @@ func TestInitDefaultLog(t *testing.T) {
 
 	isTerm = true
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -71,9 +74,9 @@ func TestInitDefaultLog(t *testing.T) {
 func TestAccessLevel(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
-	cfg.Log.AccessLevel = "invalid"
+	cfg.Log.AccessLevel = invalidLevel
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -84,9 +87,9 @@ func TestAccessLevel(t *testing.T) {
 func TestErrorLevel(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
-	cfg.Log.ErrorLevel = "invalid"
+	cfg.Log.ErrorLevel = invalidLevel
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -99,7 +102,7 @@ func TestAccessLogPath(t *testing.T) {
 
 	cfg.Log.AccessLog = "logs/access.log"
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -112,7 +115,7 @@ func TestErrorLogPath(t *testing.T) {
 
 	cfg.Log.ErrorLog = "logs/error.log"
 
-	assert.NotNil(t, InitLog(
+	require.Error(t, InitLog(
 		cfg.Log.AccessLevel,
 		cfg.Log.AccessLog,
 		cfg.Log.ErrorLevel,
@@ -124,7 +127,7 @@ func TestPlatFormType(t *testing.T) {
 	assert.Equal(t, "ios", typeForPlatForm(core.PlatFormIos))
 	assert.Equal(t, "android", typeForPlatForm(core.PlatFormAndroid))
 	assert.Equal(t, "huawei", typeForPlatForm(core.PlatFormHuawei))
-	assert.Equal(t, "", typeForPlatForm(10000))
+	assert.Empty(t, typeForPlatForm(10000))
 }
 
 func TestPlatFormColor(t *testing.T) {
@@ -135,7 +138,7 @@ func TestPlatFormColor(t *testing.T) {
 }
 
 func TestHideToken(t *testing.T) {
-	assert.Equal(t, "", hideToken("", 2))
+	assert.Empty(t, hideToken("", 2))
 	assert.Equal(t, "**345678**", hideToken("1234567890", 2))
 	assert.Equal(t, "*****", hideToken("12345", 10))
 }
@@ -152,6 +155,10 @@ func TestLogPushEntry(t *testing.T) {
 	in.Token = "1234567890"
 	in.HideToken = true
 	assert.Equal(t, "**********", GetLogPushEntry(&in).Token)
+
+	in.Message = "hellothisisamessage"
+	in.HideMessage = true
+	assert.Equal(t, "(message redacted)", GetLogPushEntry(&in).Message)
 }
 
 func TestLogPush(t *testing.T) {

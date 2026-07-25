@@ -1,5 +1,4 @@
 //go:build lambda
-// +build lambda
 
 package router
 
@@ -15,7 +14,12 @@ import (
 )
 
 // RunHTTPServer provide run http or https protocol.
-func RunHTTPServer(ctx context.Context, cfg *config.ConfYaml, q *queue.Queue, s ...*http.Server) (err error) {
+func RunHTTPServer(
+	ctx context.Context,
+	cfg *config.ConfYaml,
+	q *queue.Queue,
+	s ...*http.Server,
+) (err error) {
 	if !cfg.Core.Enabled {
 		logx.LogAccess.Debug("httpd server is disabled.")
 		return nil

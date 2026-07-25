@@ -2,18 +2,29 @@ package rpc
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"log"
+	"math"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 
+	"firebase.google.com/go/v4/messaging"
 	"github.com/appleboy/gorush/config"
 	"github.com/appleboy/gorush/core"
 	"github.com/appleboy/gorush/logx"
 	"github.com/appleboy/gorush/notify"
 	"github.com/appleboy/gorush/rpc/proto"
 
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"go.opencensus.io/plugin/ocgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
@@ -35,7 +46,10 @@ func NewServer(cfg *config.ConfYaml) *Server {
 }
 
 // Check implements `service Health`.
-func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*proto.HealthCheckResponse, error) {
+func (s *Server) Check(
+	ctx context.Context,
+	in *proto.HealthCheckRequest,
+) (*proto.HealthCheckResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if in.Service == "" {
@@ -53,7 +67,10 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 }
 
 // Send implements helloworld.GreeterServer
-func (s *Server) Send(ctx context.Context, in *proto.NotificationRequest) (*proto.NotificationReply, error) {
+func (s *Server) Send(
+	ctx context.Context,
+	in *proto.NotificationRequest,
+) (*proto.NotificationReply, error) {
 	badge := int(in.Badge)
 	notification := notify.PushNotification{
 		ID:               in.ID,
@@ -62,7 +79,6 @@ func (s *Server) Send(ctx context.Context, in *proto.NotificationRequest) (*prot
 		Message:          in.Message,
 		Title:            in.Title,
 		Topic:            in.Topic,
-		APIKey:           in.Key,
 		Category:         in.Category,
 		Sound:            in.Sound,
 		ContentAvailable: in.ContentAvailable,
@@ -70,6 +86,8 @@ func (s *Server) Send(ctx context.Context, in *proto.NotificationRequest) (*prot
 		MutableContent:   in.MutableContent,
 		Image:            in.Image,
 		Priority:         strings.ToLower(in.GetPriority().String()),
+		PushType:         in.PushType,
+		Development:      in.Development,
 	}
 
 	if badge > 0 {
@@ -77,7 +95,7 @@ func (s *Server) Send(ctx context.Context, in *proto.NotificationRequest) (*prot
 	}
 
 	if in.Topic != "" && in.Platform == core.PlatFormAndroid {
-		notification.To = in.Topic
+		notification.Topic = in.Topic
 	}
 
 	if in.Alert != nil {
@@ -96,23 +114,40 @@ func (s *Server) Send(ctx context.Context, in *proto.NotificationRequest) (*prot
 	}
 
 	if in.Data != nil {
-		notification.Data = map[string]interface{}{}
-		for k, v := range in.Data.Fields {
-			notification.Data[k] = v
+		notification.Data = in.Data.AsMap()
+	}
+
+	if in.FcmOptions != nil {
+		notification.FCMOptions = &messaging.FCMOptions{
+			AnalyticsLabel: in.FcmOptions.AnalyticsLabel,
 		}
 	}
 
 	go func() {
-		_, err := notify.SendNotification(&notification, s.cfg)
+		ctx := context.Background()
+		_, err := notify.SendNotification(ctx, &notification, s.cfg)
 		if err != nil {
 			logx.LogError.Error(err)
 		}
 	}()
 
+	counts, err := safeIntToInt32(len(notification.Tokens))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	return &proto.NotificationReply{
 		Success: true,
-		Counts:  int32(len(notification.Tokens)),
+		Counts:  counts,
 	}, nil
+}
+
+// safeIntToInt32 converts an int to an int32, returning an error if the int is out of range.
+func safeIntToInt32(n int) (int32, error) {
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		return 0, errors.New("integer overflow: value out of int32 range")
+	}
+	return int32(n), nil
 }
 
 // RunGRPCServer run gorush grpc server
@@ -122,7 +157,45 @@ func RunGRPCServer(ctx context.Context, cfg *config.ConfYaml) error {
 		return nil
 	}
 
-	s := grpc.NewServer()
+	recoveryOpt := grpc_recovery.WithRecoveryHandlerContext(
+		func(ctx context.Context, p any) error {
+			log.Printf("[PANIC] %s\n%s", p, string(debug.Stack()))
+			return status.Error(codes.Internal, "system has been broken")
+		},
+	)
+
+	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		grpc_prometheus.UnaryServerInterceptor,
+		grpc_recovery.UnaryServerInterceptor(recoveryOpt),
+	}
+
+	var s *grpc.Server
+
+	if cfg.Core.SSL && cfg.Core.CertPath != "" && cfg.Core.KeyPath != "" {
+		tlsCert, err := tls.LoadX509KeyPair(cfg.Core.CertPath, cfg.Core.KeyPath)
+		if err != nil {
+			logx.LogError.Error("failed to load tls cert file: ", err)
+			return err
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   tls.VersionTLS12, // Set minimum TLS version to TLS 1.2
+		}
+
+		s = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(tlsConfig)),
+			grpc.StatsHandler(&ocgrpc.ServerHandler{}),
+			grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
+		)
+	} else {
+		s = grpc.NewServer(
+			grpc.StatsHandler(&ocgrpc.ServerHandler{}),
+			grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
+		)
+	}
+
 	rpcSrv := NewServer(cfg)
 	proto.RegisterGorushServer(s, rpcSrv)
 	proto.RegisterHealthServer(s, rpcSrv)
@@ -130,7 +203,8 @@ func RunGRPCServer(ctx context.Context, cfg *config.ConfYaml) error {
 	// Register reflection service on gRPC server.
 	reflection.Register(s)
 
-	lis, err := net.Listen("tcp", ":"+cfg.GRPC.Port)
+	lc := &net.ListenConfig{}
+	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
 	if err != nil {
 		logx.LogError.Fatalln(err)
 		return err

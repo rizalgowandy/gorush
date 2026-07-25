@@ -9,9 +9,10 @@ import (
 	"github.com/appleboy/gorush/core"
 	"github.com/appleboy/gorush/logx"
 	"github.com/appleboy/gorush/status"
-	c "github.com/msalihkarakasli/go-hms-push/push/config"
-	client "github.com/msalihkarakasli/go-hms-push/push/core"
-	"github.com/msalihkarakasli/go-hms-push/push/model"
+
+	c "github.com/appleboy/go-hms-push/push/config"
+	client "github.com/appleboy/go-hms-push/push/core"
+	"github.com/appleboy/go-hms-push/push/model"
 )
 
 var (
@@ -37,11 +38,11 @@ func GetPushClient(conf *c.Config) (*client.HMSClient, error) {
 // InitHMSClient use for initialize HMS Client.
 func InitHMSClient(cfg *config.ConfYaml, appSecret, appID string) (*client.HMSClient, error) {
 	if appSecret == "" {
-		return nil, errors.New("Missing Huawei App Secret")
+		return nil, errors.New("missing huawei app secret")
 	}
 
 	if appID == "" {
-		return nil, errors.New("Missing Huawei App ID")
+		return nil, errors.New("missing huawei app id")
 	}
 
 	conf := &c.Config{
@@ -62,93 +63,87 @@ func InitHMSClient(cfg *config.ConfYaml, appSecret, appID string) (*client.HMSCl
 	return HMSClient, nil
 }
 
+// setHuaweiMessageTarget sets the target (tokens, topic, condition) on the message.
+func setHuaweiMessageTarget(msg *model.Message, req *PushNotification) {
+	if len(req.Tokens) > 0 {
+		msg.Token = req.Tokens
+	}
+	if len(req.Topic) > 0 {
+		msg.Topic = req.Topic
+	}
+	if len(req.Condition) > 0 {
+		msg.Condition = req.Condition
+	}
+}
+
+// setHuaweiAndroidConfig sets Android-specific configuration on the message.
+func setHuaweiAndroidConfig(android *model.AndroidConfig, req *PushNotification) {
+	if req.Priority == HIGH {
+		android.Urgency = "HIGH"
+	}
+	android.CollapseKey = req.HuaweiCollapseKey
+	if len(req.Category) > 0 {
+		android.Category = req.Category
+	}
+	if len(req.HuaweiTTL) > 0 {
+		android.TTL = req.HuaweiTTL
+	}
+	if len(req.BiTag) > 0 {
+		android.BiTag = req.BiTag
+	}
+	android.FastAppTarget = req.FastAppTarget
+}
+
+// setHuaweiNotificationContent sets the notification content fields.
+func setHuaweiNotificationContent(android *model.AndroidConfig, req *PushNotification) {
+	ensureNotification := func() {
+		if android.Notification == nil {
+			android.Notification = model.GetDefaultAndroidNotification()
+		}
+	}
+
+	if len(req.Message) > 0 {
+		ensureNotification()
+		android.Notification.Body = req.Message
+	}
+	if len(req.Title) > 0 {
+		ensureNotification()
+		android.Notification.Title = req.Title
+	}
+	if len(req.Image) > 0 {
+		ensureNotification()
+		android.Notification.Image = req.Image
+	}
+	if v, ok := req.Sound.(string); ok && len(v) > 0 {
+		ensureNotification()
+		android.Notification.Sound = v
+	} else if android.Notification != nil {
+		android.Notification.DefaultSound = true
+	}
+}
+
 // GetHuaweiNotification use for define HMS notification.
 // HTTP Connection Server Reference for HMS
 // https://developer.huawei.com/consumer/en/doc/development/HMS-References/push-sendapi
 func GetHuaweiNotification(req *PushNotification) (*model.MessageRequest, error) {
 	msgRequest := model.NewNotificationMsgRequest()
-
 	msgRequest.Message.Android = model.GetDefaultAndroid()
 
-	if len(req.Tokens) > 0 {
-		msgRequest.Message.Token = req.Tokens
-	}
+	setHuaweiMessageTarget(msgRequest.Message, req)
+	setHuaweiAndroidConfig(msgRequest.Message.Android, req)
 
-	if len(req.Topic) > 0 {
-		msgRequest.Message.Topic = req.Topic
-	}
-
-	if len(req.To) > 0 {
-		msgRequest.Message.Topic = req.To
-	}
-
-	if len(req.Condition) > 0 {
-		msgRequest.Message.Condition = req.Condition
-	}
-
-	if req.Priority == "high" {
-		msgRequest.Message.Android.Urgency = "HIGH"
-	}
-
-	// if req.HuaweiCollapseKey != nil {
-	msgRequest.Message.Android.CollapseKey = req.HuaweiCollapseKey
-	//}
-
-	if len(req.Category) > 0 {
-		msgRequest.Message.Android.Category = req.Category
-	}
-
-	if len(req.HuaweiTTL) > 0 {
-		msgRequest.Message.Android.TTL = req.HuaweiTTL
-	}
-
-	if len(req.BiTag) > 0 {
-		msgRequest.Message.Android.BiTag = req.BiTag
-	}
-
-	msgRequest.Message.Android.FastAppTarget = req.FastAppTarget
-
-	// Add data fields
 	if len(req.HuaweiData) > 0 {
 		msgRequest.Message.Data = req.HuaweiData
 	}
 
-	// Notification Message
 	if req.HuaweiNotification != nil {
 		msgRequest.Message.Android.Notification = req.HuaweiNotification
-
 		if msgRequest.Message.Android.Notification.ClickAction == nil {
 			msgRequest.Message.Android.Notification.ClickAction = model.GetDefaultClickAction()
 		}
 	}
 
-	setDefaultAndroidNotification := func() {
-		if msgRequest.Message.Android == nil {
-			msgRequest.Message.Android.Notification = model.GetDefaultAndroidNotification()
-		}
-	}
-
-	if len(req.Message) > 0 {
-		setDefaultAndroidNotification()
-		msgRequest.Message.Android.Notification.Body = req.Message
-	}
-
-	if len(req.Title) > 0 {
-		setDefaultAndroidNotification()
-		msgRequest.Message.Android.Notification.Title = req.Title
-	}
-
-	if len(req.Image) > 0 {
-		setDefaultAndroidNotification()
-		msgRequest.Message.Android.Notification.Image = req.Image
-	}
-
-	if v, ok := req.Sound.(string); ok && len(v) > 0 {
-		setDefaultAndroidNotification()
-		msgRequest.Message.Android.Notification.Sound = v
-	} else if msgRequest.Message.Android.Notification != nil {
-		msgRequest.Message.Android.Notification.DefaultSound = true
-	}
+	setHuaweiNotificationContent(msgRequest.Message.Android, req)
 
 	b, err := json.Marshal(msgRequest)
 	if err != nil {
@@ -161,7 +156,11 @@ func GetHuaweiNotification(req *PushNotification) (*model.MessageRequest, error)
 }
 
 // PushToHuawei provide send notification to Android server.
-func PushToHuawei(req *PushNotification, cfg *config.ConfYaml) (resp *ResponsePush, err error) {
+func PushToHuawei(
+	ctx context.Context,
+	req *PushNotification,
+	cfg *config.ConfYaml,
+) (resp *ResponsePush, err error) {
 	logx.LogAccess.Debug("Start push notification for Huawei")
 
 	var (
@@ -178,15 +177,14 @@ func PushToHuawei(req *PushNotification, cfg *config.ConfYaml) (resp *ResponsePu
 	err = CheckMessage(req)
 	if err != nil {
 		logx.LogError.Error("request error: " + err.Error())
-		return
+		return nil, err
 	}
 
 	client, err = InitHMSClient(cfg, cfg.Huawei.AppSecret, cfg.Huawei.AppID)
-
 	if err != nil {
 		// HMS server error
 		logx.LogError.Error("HMS server error: " + err.Error())
-		return
+		return nil, err
 	}
 
 	resp = &ResponsePush{}
@@ -196,13 +194,13 @@ Retry:
 
 	notification, _ := GetHuaweiNotification(req)
 
-	res, err := client.SendMessage(context.Background(), notification)
+	res, err := client.SendMessage(ctx, notification)
 	if err != nil {
 		// Send Message error
-		errLog := logPush(cfg, core.FailedPush, req.To, req, err)
+		errLog := logPush(cfg, core.FailedPush, req.Topic, req, err)
 		resp.Logs = append(resp.Logs, errLog)
 		logx.LogError.Error("HMS server send message error: " + err.Error())
-		return
+		return resp, err
 	}
 
 	// Huawei Push Send API does not support exact results for each token

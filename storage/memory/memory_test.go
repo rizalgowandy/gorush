@@ -1,46 +1,48 @@
 package memory
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/appleboy/gorush/core"
+
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMemoryEngine(t *testing.T) {
 	var val int64
 
 	memory := New()
+	err := memory.Init()
+	require.NoError(t, err)
 
-	assert.Nil(t, memory.Init())
-
-	memory.AddTotalCount(1)
-	val = memory.GetTotalCount()
-	assert.Equal(t, int64(1), val)
-
-	memory.AddTotalCount(100)
-	val = memory.GetTotalCount()
-	assert.Equal(t, int64(101), val)
-
-	memory.AddIosSuccess(2)
-	val = memory.GetIosSuccess()
-	assert.Equal(t, int64(2), val)
-
-	memory.AddIosError(3)
-	val = memory.GetIosError()
-	assert.Equal(t, int64(3), val)
-
-	memory.AddAndroidSuccess(4)
-	val = memory.GetAndroidSuccess()
-	assert.Equal(t, int64(4), val)
-
-	memory.AddAndroidError(5)
-	val = memory.GetAndroidError()
-	assert.Equal(t, int64(5), val)
-
-	// test reset db
-	memory.Reset()
-	val = memory.GetTotalCount()
+	// reset the value of the key to 0
+	memory.Set(core.HuaweiSuccessKey, 0)
+	val = memory.Get(core.HuaweiSuccessKey)
 	assert.Equal(t, int64(0), val)
+
+	memory.Add(core.HuaweiSuccessKey, 10)
+	val = memory.Get(core.HuaweiSuccessKey)
+	assert.Equal(t, int64(10), val)
+	memory.Add(core.HuaweiSuccessKey, 10)
+	val = memory.Get(core.HuaweiSuccessKey)
+	assert.Equal(t, int64(20), val)
+
+	memory.Set(core.HuaweiSuccessKey, 0)
+	val = memory.Get(core.HuaweiSuccessKey)
+	assert.Equal(t, int64(0), val)
+
+	// test concurrency issues
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			memory.Add(core.HuaweiSuccessKey, 1)
+		})
+	}
+	wg.Wait()
+	val = memory.Get(core.HuaweiSuccessKey)
+	assert.Equal(t, int64(10), val)
 
 	assert.NoError(t, memory.Close())
 }

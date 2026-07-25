@@ -6,8 +6,9 @@ import (
 
 	"github.com/appleboy/gorush/rpc/proto"
 
-	structpb "github.com/golang/protobuf/ptypes/struct"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 )
 
 const (
@@ -16,7 +17,7 @@ const (
 
 func main() {
 	// Set up a connection to the server.
-	conn, err := grpc.Dial(address, grpc.WithInsecure())
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}

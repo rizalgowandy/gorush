@@ -76,25 +76,23 @@ func pushHandler(cfg *config.ConfYaml, q *queue.Queue) gin.HandlerFunc {
 		}
 
 		if int64(len(form.Notifications)) > cfg.Core.MaxNotification {
-			msg = fmt.Sprintf("Number of notifications(%d) over limit(%d)", len(form.Notifications), cfg.Core.MaxNotification)
+			msg = fmt.Sprintf(
+				"Number of notifications(%d) over limit(%d)",
+				len(form.Notifications),
+				cfg.Core.MaxNotification,
+			)
 			logx.LogAccess.Debug(msg)
 			abortWithError(c, http.StatusBadRequest, msg)
 			return
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
-			// Deprecated: the CloseNotifier interface predates Go's context package.
-			// New code should use Request.Context instead.
-			// Change to context package
-			<-c.Request.Context().Done()
-			// Don't send notification after client timeout or disconnected.
-			// See the following issue for detail information.
-			// https://github.com/appleboy/gorush/issues/422
-			if cfg.Core.Sync {
-				cancel()
-			}
-		}()
+		// Use the request context directly so the context lifecycle is tied
+		// to the HTTP request. This avoids leaking a context.WithCancel on
+		// every request when running in async mode (sync: false), which was
+		// the root cause of the memory leak described in:
+		// https://github.com/appleboy/gorush/issues/422
+		// https://github.com/appleboy/gorush/issues/518
+		ctx := c.Request.Context()
 
 		counts, logs := handleNotification(ctx, cfg, form, q)
 
@@ -108,7 +106,7 @@ func pushHandler(cfg *config.ConfYaml, q *queue.Queue) gin.HandlerFunc {
 
 func configHandler(cfg *config.ConfYaml) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.YAML(http.StatusCreated, cfg)
+		c.YAML(http.StatusOK, cfg.SanitizedCopy())
 	}
 }
 
@@ -121,8 +119,10 @@ func appStatusHandler(q *queue.Queue) gin.HandlerFunc {
 		result := status.App{}
 
 		result.Version = GetVersion()
-		result.QueueMax = q.Capacity()
-		result.QueueUsage = q.Usage()
+		result.BusyWorkers = q.BusyWorkers()
+		result.SuccessTasks = q.SuccessTasks()
+		result.FailureTasks = q.FailureTasks()
+		result.SubmittedTasks = q.SubmittedTasks()
 		result.TotalCount = status.StatStorage.GetTotalCount()
 		result.Ios.PushSuccess = status.StatStorage.GetIosSuccess()
 		result.Ios.PushError = status.StatStorage.GetIosError()
@@ -157,6 +157,7 @@ func autoTLSServer(cfg *config.ConfYaml, q *queue.Queue) *http.Server {
 		Cache:      autocert.DirCache(cfg.Core.AutoTLS.Folder),
 	}
 
+	//nolint:gosec // TLS MinVersion is managed by autocert, not manually configured
 	return &http.Server{
 		Addr:      ":https",
 		TLSConfig: &tls.Config{GetCertificate: m.GetCertificate},
@@ -184,9 +185,7 @@ func routerEngine(cfg *config.ConfYaml, q *queue.Queue) *gin.Engine {
 
 	// Support metrics
 	doOnce.Do(func() {
-		m := metric.NewMetrics(func() int {
-			return q.Usage()
-		})
+		m := metric.NewMetrics(q)
 		prometheus.MustRegister(m)
 	})
 
@@ -222,7 +221,11 @@ func routerEngine(cfg *config.ConfYaml, q *queue.Queue) *gin.Engine {
 }
 
 // markFailedNotification adds failure logs for all tokens in push notification
-func markFailedNotification(cfg *config.ConfYaml, notification *notify.PushNotification, reason string) []logx.LogPushEntry {
+func markFailedNotification(
+	cfg *config.ConfYaml,
+	notification *notify.PushNotification,
+	reason string,
+) []logx.LogPushEntry {
 	logx.LogError.Error(reason)
 	logs := make([]logx.LogPushEntry, 0)
 	for _, token := range notification.Tokens {
@@ -241,53 +244,76 @@ func markFailedNotification(cfg *config.ConfYaml, notification *notify.PushNotif
 	return logs
 }
 
-// HandleNotification add notification to queue list.
-func handleNotification(ctx context.Context, cfg *config.ConfYaml, req notify.RequestPush, q *queue.Queue) (int, []logx.LogPushEntry) {
-	var count int
-	wg := sync.WaitGroup{}
-	newNotification := []*notify.PushNotification{}
+// isPlatformEnabled checks if the notification platform is enabled in config.
+func isPlatformEnabled(cfg *config.ConfYaml, platform int) bool {
+	switch platform {
+	case core.PlatFormIos:
+		return cfg.Ios.Enabled
+	case core.PlatFormAndroid:
+		return cfg.Android.Enabled
+	case core.PlatFormHuawei:
+		return cfg.Huawei.Enabled
+	default:
+		return false
+	}
+}
 
+// filterEnabledNotifications filters notifications to only those with enabled platforms.
+func filterEnabledNotifications(
+	cfg *config.ConfYaml, notifications []notify.PushNotification,
+) []*notify.PushNotification {
+	result := make([]*notify.PushNotification, 0, len(notifications))
+	for i := range notifications {
+		if isPlatformEnabled(cfg, notifications[i].Platform) {
+			result = append(result, &notifications[i])
+		}
+	}
+	return result
+}
+
+// countNotificationTargets counts the total number of targets (tokens + topics) in a notification.
+func countNotificationTargets(notification *notify.PushNotification) int {
+	count := len(notification.Tokens)
+	if notification.Topic != "" {
+		count++
+	}
+	return count
+}
+
+// HandleNotification add notification to queue list.
+func handleNotification(
+	_ context.Context,
+	cfg *config.ConfYaml,
+	req notify.RequestPush,
+	q *queue.Queue,
+) (int, []logx.LogPushEntry) {
 	if cfg.Core.Sync && !core.IsLocalQueue(core.Queue(cfg.Queue.Engine)) {
 		cfg.Core.Sync = false
 	}
 
-	for i := range req.Notifications {
-		notification := &req.Notifications[i]
-		switch notification.Platform {
-		case core.PlatFormIos:
-			if !cfg.Ios.Enabled {
-				continue
-			}
-		case core.PlatFormAndroid:
-			if !cfg.Android.Enabled {
-				continue
-			}
-		case core.PlatFormHuawei:
-			if !cfg.Huawei.Enabled {
-				continue
-			}
-		}
-		newNotification = append(newNotification, notification)
-	}
+	notifications := filterEnabledNotifications(cfg, req.Notifications)
+	isLocalSync := core.IsLocalQueue(core.Queue(cfg.Queue.Engine)) && cfg.Core.Sync
 
-	logs := make([]logx.LogPushEntry, 0, count)
-	for _, notification := range newNotification {
+	var (
+		count int
+		wg    sync.WaitGroup
+		logs  = make([]logx.LogPushEntry, 0)
+	)
+
+	for _, notification := range notifications {
 		if cfg.Core.Sync {
 			wg.Add(1)
 		}
 
-		if core.IsLocalQueue(core.Queue(cfg.Queue.Engine)) && cfg.Core.Sync {
+		if isLocalSync {
 			func(msg *notify.PushNotification, cfg *config.ConfYaml) {
 				if err := q.QueueTask(func(ctx context.Context) error {
 					defer wg.Done()
-					resp, err := notify.SendNotification(msg, cfg)
+					resp, err := notify.SendNotification(ctx, msg, cfg)
 					if err != nil {
 						return err
 					}
-
-					// add log
 					logs = append(logs, resp.Logs...)
-
 					return nil
 				}); err != nil {
 					logx.LogError.Error(err)
@@ -295,16 +321,11 @@ func handleNotification(ctx context.Context, cfg *config.ConfYaml, req notify.Re
 			}(notification, cfg)
 		} else if err := q.Queue(notification); err != nil {
 			resp := markFailedNotification(cfg, notification, "max capacity reached")
-			// add log
 			logs = append(logs, resp...)
 			wg.Done()
 		}
 
-		count += len(notification.Tokens)
-		// Count topic message
-		if notification.To != "" {
-			count++
-		}
+		count += countNotificationTargets(notification)
 	}
 
 	if cfg.Core.Sync {

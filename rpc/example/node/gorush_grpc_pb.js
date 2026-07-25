@@ -1,7 +1,7 @@
 // GENERATED CODE -- DO NOT EDIT!
 
 'use strict';
-var grpc = require('grpc');
+var grpc = require('@grpc/grpc-js');
 var gorush_pb = require('./gorush_pb.js');
 var google_protobuf_struct_pb = require('google-protobuf/google/protobuf/struct_pb.js');
 
@@ -64,7 +64,7 @@ var GorushService = exports.GorushService = {
   },
 };
 
-exports.GorushClient = grpc.makeGenericClientConstructor(GorushService);
+exports.GorushClient = grpc.makeGenericClientConstructor(GorushService, 'Gorush');
 var HealthService = exports.HealthService = {
   check: {
     path: '/proto.Health/Check',
@@ -79,4 +79,4 @@ var HealthService = exports.HealthService = {
   },
 };
 
-exports.HealthClient = grpc.makeGenericClientConstructor(HealthService);
+exports.HealthClient = grpc.makeGenericClientConstructor(HealthService, 'Health');

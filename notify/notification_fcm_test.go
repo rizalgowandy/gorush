@@ -1,43 +1,47 @@
 package notify
 
 import (
+	"context"
 	"os"
+	"reflect"
 	"testing"
 
+	"firebase.google.com/go/v4/messaging"
 	"github.com/appleboy/gorush/config"
 	"github.com/appleboy/gorush/core"
 
-	"github.com/appleboy/go-fcm"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestMissingAndroidAPIKey(t *testing.T) {
+func TestMissingAndroidCredential(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
 	cfg.Android.Enabled = true
-	cfg.Android.APIKey = ""
+	cfg.Android.Credential = ""
 
 	err := CheckPushConf(cfg)
 
-	assert.Error(t, err)
-	assert.Equal(t, "Missing Android API Key", err.Error())
+	require.Error(t, err)
+	assert.Equal(t, "missing fcm credential data", err.Error())
 }
 
 func TestMissingKeyForInitFCMClient(t *testing.T) {
 	cfg, _ := config.LoadConf()
-	cfg.Android.APIKey = ""
-	client, err := InitFCMClient(cfg, "")
+	cfg.Android.Credential = ""
+	cfg.Android.KeyPath = ""
+	client, err := InitFCMClient(context.Background(), cfg)
 
 	assert.Nil(t, client)
-	assert.Error(t, err)
-	assert.Equal(t, "Missing Android API Key", err.Error())
+	require.Error(t, err)
+	assert.Equal(t, "missing fcm credential data", err.Error())
 }
 
 func TestPushToAndroidWrongToken(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
 	cfg.Android.Enabled = true
-	cfg.Android.APIKey = os.Getenv("ANDROID_API_KEY")
+	cfg.Android.Credential = os.Getenv("FCM_CREDENTIAL")
 
 	req := &PushNotification{
 		Tokens:   []string{"aaaaaa", "bbbbb"},
@@ -46,8 +50,8 @@ func TestPushToAndroidWrongToken(t *testing.T) {
 	}
 
 	// Android Success count: 0, Failure count: 2
-	resp, err := PushToAndroid(req, cfg)
-	assert.Nil(t, err)
+	resp, err := PushToAndroid(context.Background(), req, cfg)
+	require.NoError(t, err)
 	assert.Len(t, resp.Logs, 2)
 }
 
@@ -55,11 +59,11 @@ func TestPushToAndroidRightTokenForJSONLog(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
 	cfg.Android.Enabled = true
-	cfg.Android.APIKey = os.Getenv("ANDROID_API_KEY")
+	cfg.Android.Credential = os.Getenv("FCM_CREDENTIAL")
 	// log for json
 	cfg.Log.Format = "json"
 
-	androidToken := os.Getenv("ANDROID_TEST_TOKEN")
+	androidToken := os.Getenv("FCM_TEST_TOKEN")
 
 	req := &PushNotification{
 		Tokens:   []string{androidToken},
@@ -67,18 +71,18 @@ func TestPushToAndroidRightTokenForJSONLog(t *testing.T) {
 		Message:  "Welcome",
 	}
 
-	resp, err := PushToAndroid(req, cfg)
-	assert.Nil(t, err)
-	assert.Len(t, resp.Logs, 0)
+	resp, err := PushToAndroid(context.Background(), req, cfg)
+	require.NoError(t, err)
+	assert.Empty(t, resp.Logs)
 }
 
 func TestPushToAndroidRightTokenForStringLog(t *testing.T) {
 	cfg, _ := config.LoadConf()
 
 	cfg.Android.Enabled = true
-	cfg.Android.APIKey = os.Getenv("ANDROID_API_KEY")
+	cfg.Android.Credential = os.Getenv("FCM_CREDENTIAL")
 
-	androidToken := os.Getenv("ANDROID_TEST_TOKEN")
+	androidToken := os.Getenv("FCM_TEST_TOKEN")
 
 	req := &PushNotification{
 		Tokens:   []string{androidToken},
@@ -86,33 +90,9 @@ func TestPushToAndroidRightTokenForStringLog(t *testing.T) {
 		Message:  "Welcome",
 	}
 
-	resp, err := PushToAndroid(req, cfg)
-	assert.Nil(t, err)
-	assert.Len(t, resp.Logs, 0)
-}
-
-func TestOverwriteAndroidAPIKey(t *testing.T) {
-	cfg, _ := config.LoadConf()
-
-	cfg.Core.Sync = true
-	cfg.Android.Enabled = true
-	cfg.Android.APIKey = os.Getenv("ANDROID_API_KEY")
-
-	androidToken := os.Getenv("ANDROID_TEST_TOKEN")
-
-	req := &PushNotification{
-		Tokens:   []string{androidToken, "bbbbb"},
-		Platform: core.PlatFormAndroid,
-		Message:  "Welcome",
-		// overwrite android api key
-		APIKey: "1234",
-	}
-
-	// FCM server error: 401 error: 401 Unauthorized (Wrong API Key)
-	resp, err := PushToAndroid(req, cfg)
-
-	assert.Error(t, err)
-	assert.Len(t, resp.Logs, 2)
+	resp, err := PushToAndroid(context.Background(), req, cfg)
+	require.NoError(t, err)
+	assert.Empty(t, resp.Logs)
 }
 
 func TestFCMMessage(t *testing.T) {
@@ -125,26 +105,17 @@ func TestFCMMessage(t *testing.T) {
 	}
 
 	err = CheckMessage(req)
-	assert.Error(t, err)
-
-	// the token must not be empty
-	req = &PushNotification{
-		Message: "Test",
-		Tokens:  []string{""},
-	}
-
-	err = CheckMessage(req)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// ignore check token length if send topic message
 	req = &PushNotification{
 		Message:  "Test",
 		Platform: core.PlatFormAndroid,
-		To:       "/topics/foo-bar",
+		Topic:    "/topics/foo-bar",
 	}
 
 	err = CheckMessage(req)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// "condition": "'dogs' in topics || 'cats' in topics",
 	req = &PushNotification{
@@ -154,119 +125,370 @@ func TestFCMMessage(t *testing.T) {
 	}
 
 	err = CheckMessage(req)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// the message may specify at most 1000 registration IDs
 	req = &PushNotification{
 		Message:  "Test",
 		Platform: core.PlatFormAndroid,
-		Tokens:   make([]string, 1001),
+		Tokens:   make([]string, 501),
 	}
 
 	err = CheckMessage(req)
-	assert.Error(t, err)
-
-	// the message's TimeToLive field must be an integer
-	// between 0 and 2419200 (4 weeks)
-	timeToLive := uint(2419201)
-	req = &PushNotification{
-		Message:    "Test",
-		Platform:   core.PlatFormAndroid,
-		Tokens:     []string{"XXXXXXXXX"},
-		TimeToLive: &timeToLive,
-	}
-
-	err = CheckMessage(req)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// Pass
-	timeToLive = uint(86400)
 	req = &PushNotification{
-		Message:    "Test",
-		Platform:   core.PlatFormAndroid,
-		Tokens:     []string{"XXXXXXXXX"},
-		TimeToLive: &timeToLive,
+		Message:  "Test",
+		Platform: core.PlatFormAndroid,
+		Tokens:   []string{"XXXXXXXXX"},
 	}
 
 	err = CheckMessage(req)
-	assert.NoError(t, err)
-}
-
-func TestCheckAndroidMessage(t *testing.T) {
-	cfg, _ := config.LoadConf()
-
-	cfg.Android.Enabled = true
-	cfg.Android.APIKey = os.Getenv("ANDROID_API_KEY")
-
-	timeToLive := uint(2419201)
-	req := &PushNotification{
-		Tokens:     []string{"aaaaaa", "bbbbb"},
-		Platform:   core.PlatFormAndroid,
-		Message:    "Welcome",
-		TimeToLive: &timeToLive,
-	}
-
-	// the message's TimeToLive field must be an integer between 0 and 2419200 (4 weeks)
-	resp, err := PushToAndroid(req, cfg)
-	assert.NotNil(t, err)
-	assert.Nil(t, resp)
+	require.NoError(t, err)
 }
 
 func TestAndroidNotificationStructure(t *testing.T) {
 	test := "test"
-	timeToLive := uint(100)
 	req := &PushNotification{
-		Tokens:                []string{"a", "b"},
-		Message:               "Welcome",
-		To:                    test,
-		Priority:              "high",
-		CollapseKey:           "1",
-		ContentAvailable:      true,
-		DelayWhileIdle:        true,
-		TimeToLive:            &timeToLive,
-		RestrictedPackageName: test,
-		DryRun:                true,
-		Title:                 test,
-		Sound:                 test,
+		Tokens:         []string{"a", "b"},
+		Message:        "Welcome",
+		To:             test,
+		Priority:       HIGH,
+		MutableContent: true,
+		Title:          test,
+		Sound:          test,
 		Data: D{
 			"a": "1",
 			"b": 2,
+			"json": map[string]any{
+				"c": "3",
+				"d": 4,
+			},
 		},
-		Notification: &fcm.Notification{
-			Color: test,
-			Tag:   test,
+		Notification: &messaging.Notification{
+			Title: test,
 			Body:  "",
 		},
 	}
 
-	notification := GetAndroidNotification(req)
+	messages := GetAndroidNotification(req)
 
-	assert.Equal(t, test, notification.To)
-	assert.Equal(t, "high", notification.Priority)
-	assert.Equal(t, "1", notification.CollapseKey)
-	assert.True(t, notification.ContentAvailable)
-	assert.True(t, notification.DelayWhileIdle)
-	assert.Equal(t, uint(100), *notification.TimeToLive)
-	assert.Equal(t, test, notification.RestrictedPackageName)
-	assert.True(t, notification.DryRun)
-	assert.Equal(t, test, notification.Notification.Title)
-	assert.Equal(t, test, notification.Notification.Sound)
-	assert.Equal(t, test, notification.Notification.Color)
-	assert.Equal(t, test, notification.Notification.Tag)
-	assert.Equal(t, "Welcome", notification.Notification.Body)
-	assert.Equal(t, "1", notification.Data["a"])
-	assert.Equal(t, 2, notification.Data["b"])
+	assert.Equal(t, test, messages[0].Notification.Title)
+	assert.Equal(t, "Welcome", messages[0].Notification.Body)
+	assert.Equal(t, "1", messages[0].Data["a"])
+	assert.Equal(t, "2", messages[0].Data["b"])
+	assert.JSONEq(t, `{"c":"3","d":4}`, messages[0].Data["json"])
+	assert.NotNil(t, messages[0].APNS)
+	assert.Equal(t, req.Sound, messages[0].APNS.Payload.Aps.Sound)
+	assert.Equal(t, req.MutableContent, messages[0].APNS.Payload.Aps.MutableContent)
 
 	// test empty body
 	req = &PushNotification{
 		Tokens: []string{"a", "b"},
 		To:     test,
-		Notification: &fcm.Notification{
+		Notification: &messaging.Notification{
 			Body: "",
 		},
 	}
-	notification = GetAndroidNotification(req)
+	messages = GetAndroidNotification(req)
 
-	assert.Equal(t, test, notification.To)
-	assert.Equal(t, "", notification.Notification.Body)
+	assert.Empty(t, messages[0].Notification.Body)
+}
+
+func TestAndroidBackgroundNotificationStructure(t *testing.T) {
+	data := map[string]any{
+		"a": "1",
+		"b": 2,
+		"json": map[string]any{
+			"c": "3",
+			"d": 4,
+		},
+	}
+	req := &PushNotification{
+		Tokens:           []string{"a", "b"},
+		Priority:         HIGH,
+		ContentAvailable: true,
+		Data:             data,
+	}
+
+	messages := GetAndroidNotification(req)
+
+	assert.Equal(t, "1", messages[0].Data["a"])
+	assert.Equal(t, "2", messages[0].Data["b"])
+	assert.JSONEq(t, `{"c":"3","d":4}`, messages[0].Data["json"])
+	assert.NotNil(t, messages[0].APNS)
+	assert.Equal(t, req.ContentAvailable, messages[0].APNS.Payload.Aps.ContentAvailable)
+	assert.True(t, reflect.DeepEqual(data, messages[0].APNS.Payload.Aps.CustomData))
+}
+
+// Tests for refactored helper functions
+
+func TestSetupFCMNotification(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         *PushNotification
+		wantTitle   string
+		wantBody    string
+		wantImage   string
+		wantMutable bool
+	}{
+		{
+			name: "title message and image",
+			req: &PushNotification{
+				Tokens:  []string{"token"},
+				Title:   "Test Title",
+				Message: "Test Message",
+				Image:   "https://example.com/image.png",
+			},
+			wantTitle: "Test Title",
+			wantBody:  "Test Message",
+			wantImage: "https://example.com/image.png",
+		},
+		{
+			name: "mutable content",
+			req: &PushNotification{
+				Tokens:         []string{"token"},
+				Title:          "Title",
+				MutableContent: true,
+			},
+			wantTitle:   "Title",
+			wantMutable: true,
+		},
+		{
+			name: "empty notification fields",
+			req: &PushNotification{
+				Tokens: []string{"token"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := GetAndroidNotification(tt.req)
+			if len(messages) > 0 {
+				msg := messages[0]
+				if tt.wantTitle != "" {
+					assert.Equal(t, tt.wantTitle, msg.Notification.Title)
+				}
+				if tt.wantBody != "" {
+					assert.Equal(t, tt.wantBody, msg.Notification.Body)
+				}
+				if tt.wantImage != "" {
+					assert.Equal(t, tt.wantImage, msg.Notification.ImageURL)
+				}
+				if tt.wantMutable {
+					assert.NotNil(t, msg.APNS)
+					assert.True(t, msg.APNS.Payload.Aps.MutableContent)
+				}
+			}
+		})
+	}
+}
+
+func TestSetupFCMContentAvailable(t *testing.T) {
+	data := D{"key": "value"}
+	req := &PushNotification{
+		Tokens:           []string{"token"},
+		ContentAvailable: true,
+		Data:             data,
+	}
+
+	messages := GetAndroidNotification(req)
+	assert.Len(t, messages, 1)
+	msg := messages[0]
+
+	assert.NotNil(t, msg.APNS)
+	assert.Equal(t, "5", msg.APNS.Headers["apns-priority"])
+	assert.True(t, msg.APNS.Payload.Aps.ContentAvailable)
+	assert.Equal(t, data, D(msg.APNS.Payload.Aps.CustomData))
+}
+
+func TestSetAPNSSound(t *testing.T) {
+	tests := []struct {
+		name      string
+		req       *PushNotification
+		wantSound string
+	}{
+		{
+			name: "sound with no existing APNS",
+			req: &PushNotification{
+				Tokens: []string{"token"},
+				Sound:  "default",
+			},
+			wantSound: "default",
+		},
+		{
+			name: "sound with existing APNS from mutable content",
+			req: &PushNotification{
+				Tokens:         []string{"token"},
+				Title:          "Title",
+				MutableContent: true,
+				Sound:          "custom.aiff",
+			},
+			wantSound: "custom.aiff",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := GetAndroidNotification(tt.req)
+			if len(messages) > 0 {
+				msg := messages[0]
+				assert.NotNil(t, msg.APNS)
+				assert.Equal(t, tt.wantSound, msg.APNS.Payload.Aps.Sound)
+			}
+		})
+	}
+}
+
+func TestSetupFCMSound(t *testing.T) {
+	req := &PushNotification{
+		Tokens:   []string{"token"},
+		Sound:    "test.aiff",
+		Priority: HIGH,
+	}
+
+	messages := GetAndroidNotification(req)
+	assert.Len(t, messages, 1)
+	msg := messages[0]
+
+	// Check APNS sound is set
+	assert.NotNil(t, msg.APNS)
+	assert.Equal(t, "test.aiff", msg.APNS.Payload.Aps.Sound)
+
+	// Check Android config is set with sound
+	assert.NotNil(t, msg.Android)
+	assert.Equal(t, "test.aiff", msg.Android.Notification.Sound)
+	assert.Equal(t, HIGH, msg.Android.Priority)
+}
+
+func TestConvertDataToStringMap(t *testing.T) {
+	tests := []struct {
+		name string
+		data D
+		want map[string]string
+	}{
+		{
+			name: "empty data",
+			data: D{},
+			want: nil,
+		},
+		{
+			name: "string values",
+			data: D{"key1": "value1", "key2": "value2"},
+			want: map[string]string{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name: "mixed values",
+			data: D{"str": "text", "num": 42, "bool": true},
+			want: map[string]string{"str": "text", "num": "42", "bool": "true"},
+		},
+		{
+			name: "nested object",
+			data: D{"nested": map[string]any{"a": 1}},
+			want: map[string]string{"nested": `{"a":1}`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertDataToStringMap(tt.data)
+			if tt.want == nil {
+				assert.Nil(t, got)
+			} else {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestBuildFCMMessage(t *testing.T) {
+	req := &PushNotification{
+		Tokens: []string{"token"},
+		Title:  "Title",
+		Notification: &messaging.Notification{
+			Title: "Notification Title",
+			Body:  "Notification Body",
+		},
+		Android: &messaging.AndroidConfig{
+			Priority: HIGH,
+		},
+		Webpush: &messaging.WebpushConfig{
+			Headers: map[string]string{"TTL": "3600"},
+		},
+		FCMOptions: &messaging.FCMOptions{
+			AnalyticsLabel: "test-label",
+		},
+	}
+
+	data := map[string]string{"key": "value"}
+	msg := buildFCMMessage(req, data)
+
+	assert.Equal(t, req.Notification, msg.Notification)
+	assert.Equal(t, req.Android, msg.Android)
+	assert.Equal(t, req.Webpush, msg.Webpush)
+	assert.Equal(t, req.FCMOptions, msg.FCMOptions)
+	assert.Equal(t, data, msg.Data)
+}
+
+func TestGetAndroidNotificationWithTopic(t *testing.T) {
+	req := &PushNotification{
+		Platform:  core.PlatFormAndroid,
+		Topic:     "test-topic",
+		Condition: "'dogs' in topics",
+		Message:   "Topic message",
+	}
+
+	messages := GetAndroidNotification(req)
+	assert.Len(t, messages, 1)
+	assert.Equal(t, "test-topic", messages[0].Topic)
+	assert.Equal(t, "'dogs' in topics", messages[0].Condition)
+}
+
+func TestGetAndroidNotificationWithTokens(t *testing.T) {
+	req := &PushNotification{
+		Tokens:  []string{"token1", "token2", "token3"},
+		Message: "Multi token message",
+	}
+
+	messages := GetAndroidNotification(req)
+	assert.Len(t, messages, 3)
+	assert.Equal(t, "token1", messages[0].Token)
+	assert.Equal(t, "token2", messages[1].Token)
+	assert.Equal(t, "token3", messages[2].Token)
+}
+
+func TestGetAndroidNotificationWithTopicAndTokens(t *testing.T) {
+	req := &PushNotification{
+		Platform: core.PlatFormAndroid,
+		Topic:    "test-topic",
+		Tokens:   []string{"token1", "token2"},
+		Message:  "Combined message",
+	}
+
+	messages := GetAndroidNotification(req)
+	// 1 for topic + 2 for tokens = 3 messages
+	assert.Len(t, messages, 3)
+	assert.Equal(t, "test-topic", messages[0].Topic)
+	assert.Equal(t, "token1", messages[1].Token)
+	assert.Equal(t, "token2", messages[2].Token)
+}
+
+func TestFCMDataOnlyMessageKeepsHighPriority(t *testing.T) {
+	req := &PushNotification{
+		Tokens:   []string{"test-token"},
+		Platform: core.PlatFormAndroid,
+		Priority: "high",
+		Data: map[string]any{
+			"type":    "xcall",
+			"room_id": "t_47189",
+		},
+	}
+
+	messages := GetAndroidNotification(req)
+
+	assert.Len(t, messages, 1)
+	assert.NotNil(t, messages[0].Android)
+	assert.Equal(t, "high", messages[0].Android.Priority)
 }

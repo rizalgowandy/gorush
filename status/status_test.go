@@ -8,7 +8,10 @@ import (
 	"github.com/appleboy/gorush/config"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+const redisEngine = "redis"
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
@@ -29,7 +32,7 @@ func TestStatForMemoryEngine(t *testing.T) {
 	cfg, _ := config.LoadConf()
 	cfg.Stat.Engine = "memory"
 	err := InitAppStatus(cfg)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	StatStorage.AddTotalCount(100)
 	StatStorage.AddIosSuccess(200)
@@ -51,17 +54,17 @@ func TestStatForMemoryEngine(t *testing.T) {
 
 func TestRedisServerSuccess(t *testing.T) {
 	cfg, _ := config.LoadConf()
-	cfg.Stat.Engine = "redis"
+	cfg.Stat.Engine = redisEngine
 	cfg.Stat.Redis.Addr = "redis:6379"
 
 	err := InitAppStatus(cfg)
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestRedisServerError(t *testing.T) {
 	cfg, _ := config.LoadConf()
-	cfg.Stat.Engine = "redis"
+	cfg.Stat.Engine = redisEngine
 	cfg.Stat.Redis.Addr = "redis:6370"
 
 	err := InitAppStatus(cfg)
@@ -72,12 +75,12 @@ func TestRedisServerError(t *testing.T) {
 func TestStatForRedisEngine(t *testing.T) {
 	var val int64
 	cfg, _ := config.LoadConf()
-	cfg.Stat.Engine = "redis"
+	cfg.Stat.Engine = redisEngine
 	cfg.Stat.Redis.Addr = "redis:6379"
 	err := InitAppStatus(cfg)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
-	assert.Nil(t, StatStorage.Init())
+	assert.NoError(t, StatStorage.Init())
 	StatStorage.Reset()
 
 	StatStorage.AddTotalCount(100)
@@ -103,7 +106,7 @@ func TestDefaultEngine(t *testing.T) {
 	// defaul engine as memory
 	cfg, _ := config.LoadConf()
 	err := InitAppStatus(cfg)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	StatStorage.Reset()
 
@@ -130,7 +133,7 @@ func TestStatForBoltDBEngine(t *testing.T) {
 	cfg, _ := config.LoadConf()
 	cfg.Stat.Engine = "boltdb"
 	err := InitAppStatus(cfg)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	StatStorage.Reset()
 

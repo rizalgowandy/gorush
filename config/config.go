@@ -3,117 +3,17 @@ package config
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
-
-var defaultConf = []byte(`
-core:
-  enabled: true # enable httpd server
-  address: "" # ip address to bind (default: any)
-  shutdown_timeout: 30 # default is 30 second
-  port: "8088" # ignore this port number if auto_tls is enabled (listen 443).
-  worker_num: 0 # default worker number is runtime.NumCPU()
-  queue_num: 0 # default queue number is 8192
-  max_notification: 100
-  sync: false # set true if you need get error message from fail push notification in API response.
-  feedback_hook_url: "" # set webhook url if you need get error message asynchronously from fail push notification in API response.
-  feedback_timeout: 10 # default is 10 second
-  mode: "release"
-  ssl: false
-  cert_path: "cert.pem"
-  key_path: "key.pem"
-  cert_base64: ""
-  key_base64: ""
-  http_proxy: ""
-  pid:
-    enabled: false
-    path: "gorush.pid"
-    override: true
-  auto_tls:
-    enabled: false # Automatically install TLS certificates from Let's Encrypt.
-    folder: ".cache" # folder for storing TLS certificates
-    host: "" # which domains the Let's Encrypt will attempt
-
-grpc:
-  enabled: false # enable gRPC server
-  port: 9000
-
-api:
-  push_uri: "/api/push"
-  stat_go_uri: "/api/stat/go"
-  stat_app_uri: "/api/stat/app"
-  config_uri: "/api/config"
-  sys_stat_uri: "/sys/stats"
-  metric_uri: "/metrics"
-  health_uri: "/healthz"
-
-android:
-  enabled: true
-  apikey: "YOUR_API_KEY"
-  max_retry: 0 # resend fail notification, default value zero is disabled
-
-huawei:
-  enabled: false
-  appsecret: "YOUR_APP_SECRET"
-  appid: "YOUR_APP_ID"
-  max_retry: 0 # resend fail notification, default value zero is disabled
-
-queue:
-  engine: "local" # support "local", "nsq", "nats" and "redis" default value is "local"
-  nsq:
-    addr: 127.0.0.1:4150
-    topic: gorush
-    channel: gorush
-  nats:
-    addr: 127.0.0.1:4222
-    subj: gorush
-    queue: gorush
-  redis:
-    addr: 127.0.0.1:6379
-    channel: gorush
-    size: 1024
-
-ios:
-  enabled: false
-  key_path: ""
-  key_base64: "" # load iOS key from base64 input
-  key_type: "pem" # could be pem, p12 or p8 type
-  password: "" # certificate password, default as empty string.
-  production: false
-  max_concurrent_pushes: 100 # just for push ios notification
-  max_retry: 0 # resend fail notification, default value zero is disabled
-  key_id: "" # KeyID from developer account (Certificates, Identifiers & Profiles -> Keys)
-  team_id: "" # TeamID from developer account (View Account -> Membership)
-
-log:
-  format: "string" # string or json
-  access_log: "stdout" # stdout: output to console, or define log path like "log/access_log"
-  access_level: "debug"
-  error_log: "stderr" # stderr: output to console, or define log path like "log/error_log"
-  error_level: "error"
-  hide_token: true
-
-stat:
-  engine: "memory" # support memory, redis, boltdb, buntdb or leveldb
-  redis:
-    cluster: false
-    addr: "localhost:6379" # if cluster is true, you may set this to "localhost:6379,localhost:6380,localhost:6381"
-    password: ""
-    db: 0
-  boltdb:
-    path: "bolt.db"
-    bucket: "gorush"
-  buntdb:
-    path: "bunt.db"
-  leveldb:
-    path: "level.db"
-  badgerdb:
-    path: "badger.db"
-`)
 
 // ConfYaml is config structure.
 type ConfYaml struct {
@@ -145,10 +45,12 @@ type SectionCore struct {
 	CertBase64      string         `yaml:"cert_base64"`
 	KeyBase64       string         `yaml:"key_base64"`
 	HTTPProxy       string         `yaml:"http_proxy"`
-	FeedbackURL     string         `yaml:"feedback_hook_url"`
-	FeedbackTimeout int64          `yaml:"feedback_timeout"`
 	PID             SectionPID     `yaml:"pid"`
 	AutoTLS         SectionAutoTLS `yaml:"auto_tls"`
+
+	FeedbackURL     string   `yaml:"feedback_hook_url"`
+	FeedbackTimeout int64    `yaml:"feedback_timeout"`
+	FeedbackHeader  []string `yaml:"feedback_header"`
 }
 
 // SectionAutoTLS support Let's Encrypt setting.
@@ -171,9 +73,10 @@ type SectionAPI struct {
 
 // SectionAndroid is sub section of config.
 type SectionAndroid struct {
-	Enabled  bool   `yaml:"enabled"`
-	APIKey   string `yaml:"apikey"`
-	MaxRetry int    `yaml:"max_retry"`
+	Enabled    bool   `yaml:"enabled"`
+	KeyPath    string `yaml:"key_path"`
+	Credential string `yaml:"credential"`
+	MaxRetry   int    `yaml:"max_retry"`
 }
 
 // SectionHuawei is sub section of config.
@@ -200,12 +103,13 @@ type SectionIos struct {
 
 // SectionLog is sub section of config.
 type SectionLog struct {
-	Format      string `yaml:"format"`
-	AccessLog   string `yaml:"access_log"`
-	AccessLevel string `yaml:"access_level"`
-	ErrorLog    string `yaml:"error_log"`
-	ErrorLevel  string `yaml:"error_level"`
-	HideToken   bool   `yaml:"hide_token"`
+	Format       string `yaml:"format"`
+	AccessLog    string `yaml:"access_log"`
+	AccessLevel  string `yaml:"access_level"`
+	ErrorLog     string `yaml:"error_log"`
+	ErrorLevel   string `yaml:"error_level"`
+	HideToken    bool   `yaml:"hide_token"`
+	HideMessages bool   `yaml:"hide_messages"`
 }
 
 // SectionStat is sub section of config.
@@ -242,15 +146,21 @@ type SectionNATS struct {
 
 // SectionRedisQueue is sub section of config.
 type SectionRedisQueue struct {
-	Addr    string `yaml:"addr"`
-	Channel string `yaml:"channel"`
-	Size    int    `yaml:"size"`
+	Addr       string `yaml:"addr"`
+	Username   string `yaml:"username"`
+	Password   string `yaml:"password"`
+	DB         int    `yaml:"db"`
+	StreamName string `yaml:"stream_name"`
+	Group      string `yaml:"group"`
+	Consumer   string `yaml:"consumer"`
+	WithTLS    bool   `yaml:"with_tls"`
 }
 
 // SectionRedis is sub section of config.
 type SectionRedis struct {
 	Cluster  bool   `yaml:"cluster"`
 	Addr     string `yaml:"addr"`
+	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
 }
@@ -289,147 +199,312 @@ type SectionGRPC struct {
 	Port    string `yaml:"port"`
 }
 
-func setDefault() {
-	viper.SetDefault("ios.max_concurrent_pushes", uint(100))
+func setDefaults(v *viper.Viper) {
+	// Core
+	v.SetDefault("core.enabled", true)
+	v.SetDefault("core.address", "")
+	v.SetDefault("core.shutdown_timeout", 30)
+	v.SetDefault("core.port", "8088")
+	v.SetDefault("core.worker_num", 0)
+	v.SetDefault("core.queue_num", 0)
+	v.SetDefault("core.max_notification", 100)
+	v.SetDefault("core.sync", false)
+	v.SetDefault("core.feedback_hook_url", "")
+	v.SetDefault("core.feedback_timeout", 10)
+	v.SetDefault("core.mode", "release")
+	v.SetDefault("core.ssl", false)
+	v.SetDefault("core.cert_path", "cert.pem")
+	v.SetDefault("core.key_path", "key.pem")
+	v.SetDefault("core.cert_base64", "")
+	v.SetDefault("core.key_base64", "")
+	v.SetDefault("core.http_proxy", "")
+	v.SetDefault("core.pid.enabled", false)
+	v.SetDefault("core.pid.path", "gorush.pid")
+	v.SetDefault("core.pid.override", true)
+	v.SetDefault("core.auto_tls.enabled", false)
+	v.SetDefault("core.auto_tls.folder", ".cache")
+	v.SetDefault("core.auto_tls.host", "")
+
+	// API
+	v.SetDefault("api.push_uri", "/api/push")
+	v.SetDefault("api.stat_go_uri", "/api/stat/go")
+	v.SetDefault("api.stat_app_uri", "/api/stat/app")
+	v.SetDefault("api.config_uri", "/api/config")
+	v.SetDefault("api.sys_stat_uri", "/sys/stats")
+	v.SetDefault("api.metric_uri", "/metrics")
+	v.SetDefault("api.health_uri", "/healthz")
+
+	// Android
+	v.SetDefault("android.enabled", true)
+	v.SetDefault("android.max_retry", 0)
+	v.SetDefault("android.key_path", "")
+	v.SetDefault("android.credential", "")
+
+	// Huawei
+	v.SetDefault("huawei.enabled", false)
+	v.SetDefault("huawei.appsecret", "")
+	v.SetDefault("huawei.appid", "")
+	v.SetDefault("huawei.max_retry", 0)
+
+	// iOS
+	v.SetDefault("ios.enabled", false)
+	v.SetDefault("ios.key_path", "")
+	v.SetDefault("ios.key_base64", "")
+	v.SetDefault("ios.key_type", "pem")
+	v.SetDefault("ios.password", "")
+	v.SetDefault("ios.production", false)
+	v.SetDefault("ios.max_concurrent_pushes", uint(100))
+	v.SetDefault("ios.max_retry", 0)
+	v.SetDefault("ios.key_id", "")
+	v.SetDefault("ios.team_id", "")
+
+	// gRPC
+	v.SetDefault("grpc.enabled", false)
+	v.SetDefault("grpc.port", "9000")
+
+	// Queue
+	v.SetDefault("queue.engine", "local")
+	v.SetDefault("queue.nsq.addr", "127.0.0.1:4150")
+	v.SetDefault("queue.nsq.topic", "gorush")
+	v.SetDefault("queue.nsq.channel", "gorush")
+	v.SetDefault("queue.nats.addr", "127.0.0.1:4222")
+	v.SetDefault("queue.nats.subj", "gorush")
+	v.SetDefault("queue.nats.queue", "gorush")
+	v.SetDefault("queue.redis.addr", "127.0.0.1:6379")
+	v.SetDefault("queue.redis.group", "gorush")
+	v.SetDefault("queue.redis.consumer", "gorush")
+	v.SetDefault("queue.redis.stream_name", "gorush")
+	v.SetDefault("queue.redis.with_tls", false)
+	v.SetDefault("queue.redis.username", "")
+	v.SetDefault("queue.redis.password", "")
+	v.SetDefault("queue.redis.db", 0)
+
+	// Stat
+	v.SetDefault("stat.engine", "memory")
+	v.SetDefault("stat.redis.cluster", false)
+	v.SetDefault("stat.redis.addr", "localhost:6379")
+	v.SetDefault("stat.redis.username", "")
+	v.SetDefault("stat.redis.password", "")
+	v.SetDefault("stat.redis.db", 0)
+	v.SetDefault("stat.boltdb.path", "bolt.db")
+	v.SetDefault("stat.boltdb.bucket", "gorush")
+	v.SetDefault("stat.buntdb.path", "bunt.db")
+	v.SetDefault("stat.leveldb.path", "level.db")
+	v.SetDefault("stat.badgerdb.path", "badger.db")
+
+	// Log
+	v.SetDefault("log.format", "string")
+	v.SetDefault("log.access_log", "stdout")
+	v.SetDefault("log.access_level", "debug")
+	v.SetDefault("log.error_log", "stderr")
+	v.SetDefault("log.error_level", "error")
+	v.SetDefault("log.hide_token", true)
+	v.SetDefault("log.hide_messages", false)
 }
 
 // LoadConf load config from file and read in environment variables that match
 func LoadConf(confPath ...string) (*ConfYaml, error) {
-	conf := &ConfYaml{}
+	v := viper.New()
+	setDefaults(v)
 
-	// load default values
-	setDefault()
+	v.SetConfigType("yaml")
+	v.AutomaticEnv()         // read in environment variables that match
+	v.SetEnvPrefix("gorush") // will be uppercased automatically
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	viper.SetConfigType("yaml")
-	viper.AutomaticEnv()         // read in environment variables that match
-	viper.SetEnvPrefix("gorush") // will be uppercased automatically
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-
+	// If config path is provided, load from file
 	if len(confPath) > 0 && confPath[0] != "" {
-		content, err := ioutil.ReadFile(confPath[0])
+		content, err := os.ReadFile(confPath[0])
 		if err != nil {
-			return conf, err
+			return nil, fmt.Errorf("failed to read config file %s: %w", confPath[0], err)
 		}
 
-		if err := viper.ReadConfig(bytes.NewBuffer(content)); err != nil {
-			return conf, err
+		if err := v.ReadConfig(bytes.NewBuffer(content)); err != nil {
+			return nil, fmt.Errorf("failed to parse config file %s: %w", confPath[0], err)
 		}
-	} else {
-		// Search config in home directory with name ".gorush" (without extension).
-		viper.AddConfigPath("/etc/gorush/")
-		viper.AddConfigPath("$HOME/.gorush")
-		viper.AddConfigPath(".")
-		viper.SetConfigName("config")
 
-		// If a config file is found, read it in.
-		if err := viper.ReadInConfig(); err == nil {
-			fmt.Println("Using config file:", viper.ConfigFileUsed())
-		} else if err := viper.ReadConfig(bytes.NewBuffer(defaultConf)); err != nil {
-			// load default config
-			return conf, err
-		}
+		return loadConfigFromViper(v)
 	}
 
-	// Core
-	conf.Core.Address = viper.GetString("core.address")
-	conf.Core.Port = viper.GetString("core.port")
-	conf.Core.ShutdownTimeout = int64(viper.GetInt("core.shutdown_timeout"))
-	conf.Core.Enabled = viper.GetBool("core.enabled")
-	conf.Core.WorkerNum = int64(viper.GetInt("core.worker_num"))
-	conf.Core.QueueNum = int64(viper.GetInt("core.queue_num"))
-	conf.Core.Mode = viper.GetString("core.mode")
-	conf.Core.Sync = viper.GetBool("core.sync")
-	conf.Core.FeedbackURL = viper.GetString("core.feedback_hook_url")
-	conf.Core.FeedbackTimeout = int64(viper.GetInt("core.feedback_timeout"))
-	conf.Core.SSL = viper.GetBool("core.ssl")
-	conf.Core.CertPath = viper.GetString("core.cert_path")
-	conf.Core.KeyPath = viper.GetString("core.key_path")
-	conf.Core.CertBase64 = viper.GetString("core.cert_base64")
-	conf.Core.KeyBase64 = viper.GetString("core.key_base64")
-	conf.Core.MaxNotification = int64(viper.GetInt("core.max_notification"))
-	conf.Core.HTTPProxy = viper.GetString("core.http_proxy")
-	conf.Core.PID.Enabled = viper.GetBool("core.pid.enabled")
-	conf.Core.PID.Path = viper.GetString("core.pid.path")
-	conf.Core.PID.Override = viper.GetBool("core.pid.override")
-	conf.Core.AutoTLS.Enabled = viper.GetBool("core.auto_tls.enabled")
-	conf.Core.AutoTLS.Folder = viper.GetString("core.auto_tls.folder")
-	conf.Core.AutoTLS.Host = viper.GetString("core.auto_tls.host")
+	// Search for config.{yaml,yml,json,...} in standard directories.
+	v.AddConfigPath("/etc/gorush/")
+	v.AddConfigPath("$HOME/.gorush")
+	v.AddConfigPath(".")
+	v.SetConfigName("config")
 
-	// Api
-	conf.API.PushURI = viper.GetString("api.push_uri")
-	conf.API.StatGoURI = viper.GetString("api.stat_go_uri")
-	conf.API.StatAppURI = viper.GetString("api.stat_app_uri")
-	conf.API.ConfigURI = viper.GetString("api.config_uri")
-	conf.API.SysStatURI = viper.GetString("api.sys_stat_uri")
-	conf.API.MetricURI = viper.GetString("api.metric_uri")
-	conf.API.HealthURI = viper.GetString("api.health_uri")
+	// If a config file is found, read it in.
+	if err := v.ReadInConfig(); err != nil {
+		// Only ignore "config file not found" — fail on parse/permission errors
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("failed to read config: %w", err)
+		}
+	} else {
+		log.Println("Using config file:", v.ConfigFileUsed())
+	}
 
-	// Android
-	conf.Android.Enabled = viper.GetBool("android.enabled")
-	conf.Android.APIKey = viper.GetString("android.apikey")
-	conf.Android.MaxRetry = viper.GetInt("android.max_retry")
+	return loadConfigFromViper(v)
+}
 
-	// Huawei
-	conf.Huawei.Enabled = viper.GetBool("huawei.enabled")
-	conf.Huawei.AppSecret = viper.GetString("huawei.appsecret")
-	conf.Huawei.AppID = viper.GetString("huawei.appid")
-	conf.Huawei.MaxRetry = viper.GetInt("huawei.max_retry")
+// loadConfigFromViper unmarshals viper config into the ConfYaml struct
+func loadConfigFromViper(v *viper.Viper) (*ConfYaml, error) {
+	conf := &ConfYaml{}
 
-	// iOS
-	conf.Ios.Enabled = viper.GetBool("ios.enabled")
-	conf.Ios.KeyPath = viper.GetString("ios.key_path")
-	conf.Ios.KeyBase64 = viper.GetString("ios.key_base64")
-	conf.Ios.KeyType = viper.GetString("ios.key_type")
-	conf.Ios.Password = viper.GetString("ios.password")
-	conf.Ios.Production = viper.GetBool("ios.production")
-	conf.Ios.MaxConcurrentPushes = viper.GetUint("ios.max_concurrent_pushes")
-	conf.Ios.MaxRetry = viper.GetInt("ios.max_retry")
-	conf.Ios.KeyID = viper.GetString("ios.key_id")
-	conf.Ios.TeamID = viper.GetString("ios.team_id")
+	err := v.Unmarshal(conf, func(dc *mapstructure.DecoderConfig) {
+		dc.TagName = "yaml"
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
 
-	// log
-	conf.Log.Format = viper.GetString("log.format")
-	conf.Log.AccessLog = viper.GetString("log.access_log")
-	conf.Log.AccessLevel = viper.GetString("log.access_level")
-	conf.Log.ErrorLog = viper.GetString("log.error_log")
-	conf.Log.ErrorLevel = viper.GetString("log.error_level")
-	conf.Log.HideToken = viper.GetBool("log.hide_token")
+	// GetStringSlice handles space-delimited env vars (e.g., "key1:val1 key2:val2")
+	// which Unmarshal does not split automatically
+	conf.Core.FeedbackHeader = v.GetStringSlice("core.feedback_header")
 
-	// Queue Engine
-	conf.Queue.Engine = viper.GetString("queue.engine")
-	conf.Queue.NSQ.Addr = viper.GetString("queue.nsq.addr")
-	conf.Queue.NSQ.Topic = viper.GetString("queue.nsq.topic")
-	conf.Queue.NSQ.Channel = viper.GetString("queue.nsq.channel")
-	conf.Queue.NATS.Addr = viper.GetString("queue.nats.addr")
-	conf.Queue.NATS.Subj = viper.GetString("queue.nats.subj")
-	conf.Queue.NATS.Queue = viper.GetString("queue.nats.queue")
-	conf.Queue.Redis.Addr = viper.GetString("queue.redis.addr")
-	conf.Queue.Redis.Channel = viper.GetString("queue.redis.channel")
-	conf.Queue.Redis.Size = viper.GetInt("queue.redis.size")
-
-	// Stat Engine
-	conf.Stat.Engine = viper.GetString("stat.engine")
-	conf.Stat.Redis.Cluster = viper.GetBool("stat.redis.cluster")
-	conf.Stat.Redis.Addr = viper.GetString("stat.redis.addr")
-	conf.Stat.Redis.Password = viper.GetString("stat.redis.password")
-	conf.Stat.Redis.DB = viper.GetInt("stat.redis.db")
-	conf.Stat.BoltDB.Path = viper.GetString("stat.boltdb.path")
-	conf.Stat.BoltDB.Bucket = viper.GetString("stat.boltdb.bucket")
-	conf.Stat.BuntDB.Path = viper.GetString("stat.buntdb.path")
-	conf.Stat.LevelDB.Path = viper.GetString("stat.leveldb.path")
-	conf.Stat.BadgerDB.Path = viper.GetString("stat.badgerdb.path")
-
-	// gRPC Server
-	conf.GRPC.Enabled = viper.GetBool("grpc.enabled")
-	conf.GRPC.Port = viper.GetString("grpc.port")
-
-	if conf.Core.WorkerNum == int64(0) {
+	if conf.Core.WorkerNum == 0 {
 		conf.Core.WorkerNum = int64(runtime.NumCPU())
 	}
 
-	if conf.Core.QueueNum == int64(0) {
-		conf.Core.QueueNum = int64(8192)
+	if conf.Core.QueueNum == 0 {
+		conf.Core.QueueNum = 8192
 	}
 
 	return conf, nil
+}
+
+// ValidatePort validates that a port string is within valid range
+func ValidatePort(port string) error {
+	if port == "" {
+		return nil // empty port is allowed, will use default
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid port format: %s", port)
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("port out of range (1-65535): %d", p)
+	}
+	return nil
+}
+
+// ValidateAddress validates that an address is not empty and contains valid characters
+func ValidateAddress(addr string) error {
+	if addr == "" {
+		return nil // empty address is allowed, will bind to all interfaces
+	}
+	// Basic validation - check if it's a valid IP or hostname format
+	if net.ParseIP(addr) == nil {
+		// If not a valid IP, check if it could be a hostname (basic check)
+		if len(addr) > 253 || strings.Contains(addr, "..") {
+			return fmt.Errorf("invalid address format: %s", addr)
+		}
+	}
+	return nil
+}
+
+// ValidatePIDPath validates and sanitizes PID file path to prevent path traversal
+func ValidatePIDPath(pidPath string) error {
+	if pidPath == "" {
+		return nil
+	}
+
+	// Clean the path to resolve any . or .. elements
+	cleanPath := filepath.Clean(pidPath)
+
+	// Check for path traversal attempts by looking for ".." in the cleaned path
+	// If a relative path attempts to traverse upwards, it will still have a ".." prefix after cleaning
+	if !filepath.IsAbs(cleanPath) && strings.HasPrefix(cleanPath, "..") {
+		return fmt.Errorf("path traversal detected in PID path: %s", pidPath)
+	}
+
+	// Ensure the path is not trying to write to sensitive system directories
+	sensitive := []string{"/etc/", "/usr/", "/var/", "/sys/", "/proc/"}
+	for _, prefix := range sensitive {
+		if strings.HasPrefix(cleanPath, prefix) {
+			return fmt.Errorf("cannot write PID file to sensitive directory: %s", cleanPath)
+		}
+	}
+
+	return nil
+}
+
+// ValidateConfig validates critical configuration parameters
+func ValidateConfig(cfg *ConfYaml) error {
+	if err := ValidatePort(cfg.Core.Port); err != nil {
+		return fmt.Errorf("invalid core port: %w", err)
+	}
+
+	if err := ValidateAddress(cfg.Core.Address); err != nil {
+		return fmt.Errorf("invalid core address: %w", err)
+	}
+
+	if err := ValidatePIDPath(cfg.Core.PID.Path); err != nil {
+		return fmt.Errorf("invalid PID path: %w", err)
+	}
+
+	// Validate Redis address if Redis is enabled
+	if cfg.Stat.Engine == "redis" && cfg.Stat.Redis.Addr != "" {
+		host, port, err := net.SplitHostPort(cfg.Stat.Redis.Addr)
+		if err != nil {
+			return fmt.Errorf("invalid Redis address format: %s", cfg.Stat.Redis.Addr)
+		}
+		if err := ValidateAddress(host); err != nil {
+			return fmt.Errorf("invalid Redis host: %w", err)
+		}
+		if err := ValidatePort(port); err != nil {
+			return fmt.Errorf("invalid Redis port: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// SanitizedCopy returns a copy of the config with sensitive fields redacted.
+func (c *ConfYaml) SanitizedCopy() *ConfYaml {
+	sanitized := *c
+
+	// Core TLS & proxy
+	sanitized.Core.CertBase64 = redact(c.Core.CertBase64)
+	sanitized.Core.KeyBase64 = redact(c.Core.KeyBase64)
+	sanitized.Core.HTTPProxy = redact(c.Core.HTTPProxy)
+	sanitized.Core.CertPath = redact(c.Core.CertPath)
+	sanitized.Core.KeyPath = redact(c.Core.KeyPath)
+	if len(c.Core.FeedbackHeader) > 0 {
+		sanitized.Core.FeedbackHeader = make([]string, len(c.Core.FeedbackHeader))
+		for i, v := range c.Core.FeedbackHeader {
+			if v != "" {
+				sanitized.Core.FeedbackHeader[i] = "[REDACTED]"
+			}
+		}
+	}
+
+	// Android
+	sanitized.Android.KeyPath = redact(c.Android.KeyPath)
+	sanitized.Android.Credential = redact(c.Android.Credential)
+
+	// Huawei
+	sanitized.Huawei.AppSecret = redact(c.Huawei.AppSecret)
+
+	// iOS
+	sanitized.Ios.KeyPath = redact(c.Ios.KeyPath)
+	sanitized.Ios.KeyBase64 = redact(c.Ios.KeyBase64)
+	sanitized.Ios.Password = redact(c.Ios.Password)
+	sanitized.Ios.KeyID = redact(c.Ios.KeyID)
+	sanitized.Ios.TeamID = redact(c.Ios.TeamID)
+
+	// Queue Redis
+	sanitized.Queue.Redis.Username = redact(c.Queue.Redis.Username)
+	sanitized.Queue.Redis.Password = redact(c.Queue.Redis.Password)
+
+	// Stat Redis
+	sanitized.Stat.Redis.Username = redact(c.Stat.Redis.Username)
+	sanitized.Stat.Redis.Password = redact(c.Stat.Redis.Password)
+
+	return &sanitized
+}
+
+func redact(s string) string {
+	if s != "" {
+		return "[REDACTED]"
+	}
+	return ""
 }
